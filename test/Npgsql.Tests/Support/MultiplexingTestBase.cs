@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Concurrent;
 using NUnit.Framework;
 
@@ -19,6 +20,9 @@ public abstract class MultiplexingTestBase : TestBase
     protected MultiplexingTestBase(MultiplexingMode multiplexingMode)
     {
         MultiplexingMode = multiplexingMode;
+
+        AppContext.SetSwitch("Npgsql.EnableStoredProcedureCompatMode", true);
+        AppContext.SetSwitch("Npgsql.EnableAutoDereferencingCursorsMode", true);
 
         // If the test requires multiplexing to be on or off, use a small cache to avoid reparsing and
         // regenerating the connection string every time

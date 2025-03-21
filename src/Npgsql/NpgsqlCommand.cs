@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -74,9 +75,11 @@ public class NpgsqlCommand : DbCommand, ICloneable, IComponent
 #if DEBUG
     internal static bool EnableSqlRewriting;
     internal static bool EnableStoredProcedureCompatMode;
+    internal static bool EnableAutoDereferencingCursorsMode;
 #else
     internal static readonly bool EnableSqlRewriting;
     internal static readonly bool EnableStoredProcedureCompatMode;
+    internal static readonly bool EnableAutoDereferencingCursorsMode;
 #endif
 
     internal bool EnableErrorBarriers { get; set; }
@@ -84,6 +87,8 @@ public class NpgsqlCommand : DbCommand, ICloneable, IComponent
     static readonly List<NpgsqlParameter> EmptyParameters = new();
 
     static readonly SingleThreadSynchronizationContext SingleThreadSynchronizationContext = new("NpgsqlRemainingAsyncSendWorker");
+
+    NpgsqlCommand? _childCommand;
 
     #endregion Fields
 
@@ -99,6 +104,7 @@ public class NpgsqlCommand : DbCommand, ICloneable, IComponent
     {
         EnableSqlRewriting = !AppContext.TryGetSwitch("Npgsql.EnableSqlRewriting", out var enabled) || enabled;
         EnableStoredProcedureCompatMode = AppContext.TryGetSwitch("Npgsql.EnableStoredProcedureCompatMode", out enabled) && enabled;
+        EnableAutoDereferencingCursorsMode = AppContext.TryGetSwitch("Npgsql.EnableAutoDereferencingCursorsMode", out enabled) && enabled;
     }
 
     /// <summary>
@@ -1506,10 +1512,25 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 var reader = connector.DataReader;
                 reader.Init(this, behavior, InternalBatchCommands, sendTask);
                 connector.CurrentReader = reader;
-                if (async)
+
+                if (async) {
                     await reader.NextResultAsync(cancellationToken);
-                else
+                    //TODO: need to add the handling of the dereferencing of cursors if the mode is enabled and calling async
+                } else {
                     reader.NextResult();
+                    if (EnableAutoDereferencingCursorsMode && CommandType == CommandType.StoredProcedure && reader.FieldCount == 1 && reader.GetDataTypeName(0) == "refcursor") {
+                        // When a function returns a sole column of refcursor, transparently
+                        // FETCH ALL from every such cursor and return those results.
+                        var sw = new StringWriter();
+                        while (reader.Read()) {
+                            sw.Write($"FETCH ALL FROM \"{reader.GetString(0)}\";");
+                        }
+                        reader.Close();
+                        //TODO: need to investigate any performance hits, un-disposed objects, or left open cursors this might incur
+                        _childCommand = new NpgsqlCommand(sw.ToString(), connector);
+                        return _childCommand.ExecuteReader();
+                    }
+                }
 
                 TraceReceivedFirstResponse();
 
@@ -1658,6 +1679,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             AllResultTypesAreUnknown = false;
             Debug.Assert(_unknownResultTypeList is null);
             InternalConnection.CachedCommand = this;
+            _childCommand?.Dispose();
             return;
         }
 

@@ -568,8 +568,7 @@ public class CommandTests : MultiplexingTestBase
     #endregion
 
     [Test]
-    public async Task SingleRow([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare)
-    {
+    public async Task SingleRow([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare) {
         if (prepare == PrepareOrNot.Prepared && IsMultiplexing)
             return;
 
@@ -583,6 +582,45 @@ public class CommandTests : MultiplexingTestBase
         Assert.That(reader.Read(), Is.True);
         Assert.That(reader.GetInt32(0), Is.EqualTo(1));
         Assert.That(reader.Read(), Is.False);
+    }
+
+
+    [Test]
+    public async Task CursorDereferencing([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare) {
+        if (prepare == PrepareOrNot.Prepared && IsMultiplexing)
+            return;
+
+        using (var conn = await OpenConnectionAsync()) {
+            using (var transaction = conn.BeginTransaction()) {
+                using (var command = conn.CreateCommand()) {
+                    command.CommandText = "func_User_GetProfiles";
+                    command.CommandType = CommandType.StoredProcedure;
+                    command.Transaction = transaction;
+                    command.Parameters.Add(new NpgsqlParameter("pusername", DbType.String, 255)).Value = "adminmetertex";
+                    using (var reader = command.ExecuteReader()) {
+                        var employeeIDOrdinal = reader.GetOrdinal("employeeID");
+                        Assert.That(employeeIDOrdinal, Is.EqualTo(0));
+
+                        while (reader.Read()) {
+                            Assert.That(reader.GetInt32(employeeIDOrdinal), Is.EqualTo(9));
+                        }
+                    }
+
+                    command.Parameters.Clear();
+                    command.CommandText = "func_EntityAttribute_ByType";
+                    command.Parameters.Add(new NpgsqlParameter("pcompanyid", DbType.Int16)).Value = 2;
+                    command.Parameters.Add(new NpgsqlParameter("pentityattributetypeid", DbType.Int16)).Value = 4;
+                    using (var reader = command.ExecuteReader()) {
+                        var entityAttributeIDOrdinal = reader.GetOrdinal("entityAttributeID");
+                        Assert.That(entityAttributeIDOrdinal, Is.EqualTo(0));
+
+                        while (reader.Read()) {
+                            Assert.That(reader.GetInt32(entityAttributeIDOrdinal), Is.EqualTo(13));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #region Parameters
