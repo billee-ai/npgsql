@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches:
-      - billee-main
+    branches: [ '*' ]
   pull_request:
+    branches: [ '*' ]
 
 env:
   dotnet_sdk_version: '8.0.x'
@@ -31,25 +31,3 @@ jobs:
       - name: Build
         run: dotnet build -c Release /p:LanguageVersion=latest
         shell: bash
-
-  publish:
-    needs: build
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Setup .NET Core SDK
-        uses: actions/setup-dotnet@v3.0.3
-        with:
-          dotnet-version: ${{ env.dotnet_sdk_version }}
-
-      - name: Pack
-        run: dotnet pack Npgsql.sln --configuration Release --property:PackageOutputPath="$PWD/nupkgs" -p:ContinuousIntegrationBuild=true
-
-      - name: Publish to GitHub Packages
-        run: |
-          working-directory: nupkgs
-          dotnet nuget add source --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github --source "https://nuget.pkg.github.com/${{ github.repository }}"
-          dotnet nuget push "*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source github
