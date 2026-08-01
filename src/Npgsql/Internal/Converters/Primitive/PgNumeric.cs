@@ -301,8 +301,7 @@ readonly struct PgNumeric(ArraySegment<short> digits, short weight, short sign, 
             if (digitCount > MaxDecimalNumericDigits)
                 throw new OverflowException("Numeric value does not fit in a System.Decimal");
 
-            if (Math.Abs(scale) > MaxDecimalScale)
-                throw new OverflowException("Numeric value does not fit in a System.Decimal");
+            scale = scale > 0 ? Math.Min(scale, (short)MaxDecimalScale) : Math.Max(scale, (short)-MaxDecimalScale);
 
             var scaleFactor = new decimal(1, 0, 0, false, (byte)(scale > 0 ? scale : 0));
             if (digitCount == 0)
