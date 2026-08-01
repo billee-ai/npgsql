@@ -127,7 +127,7 @@ public class NumericTests : MultiplexingTestBase
     {
         using var conn = await OpenConnectionAsync();
         //This 29-digit number causes OverflowException. Here it is important to have unread column after failing one to leave it ReaderState.InResult
-        using var cmd = new NpgsqlCommand(@"SELECT (0.20285714285714285714285714285)::numeric, generate_series FROM generate_series(1, 2)", conn);
+        using var cmd = new NpgsqlCommand(@"SELECT (0.2028571428571428571428571428532736200313986)::numeric, generate_series FROM generate_series(1, 2)", conn);
         using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess);
         var i = 1;
 

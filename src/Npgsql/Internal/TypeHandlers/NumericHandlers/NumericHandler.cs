@@ -73,8 +73,10 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
             if (scale > MaxDecimalScale)
             {
                 var diff = (short)(scale - MaxDecimalScale);
-                groups -= diff;
-                weight += diff;
+                var shift = (short)(diff / 4);
+                if (diff % 4 != 0) shift += 1;
+                groups -= shift;
+                weight += shift;
                 scale = MaxDecimalScale;
             }
             result.Scale = scale;
