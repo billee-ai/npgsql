@@ -133,10 +133,12 @@ public class NumericTests : MultiplexingTestBase
 
         while (reader.Read())
         {
-            Assert.That(() => reader.GetDecimal(0),
-                Throws.Exception
-                    .With.TypeOf<OverflowException>()
-                    .With.Message.EqualTo("Numeric value does not fit in a System.Decimal"));
+            var decimalValue = reader.GetDecimal(0);
+            Assert.That(decimalValue, Is.EqualTo(0.2028571428571428571428571428m));
+            // Assert.That(() => reader.GetDecimal(0),
+            //     Throws.Exception
+            //         .With.TypeOf<OverflowException>()
+            //         .With.Message.EqualTo("Numeric value does not fit in a System.Decimal"));
             var intValue = reader.GetInt32(1);
 
             Assert.That(intValue, Is.EqualTo(i++));

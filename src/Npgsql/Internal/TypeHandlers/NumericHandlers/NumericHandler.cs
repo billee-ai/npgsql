@@ -45,6 +45,7 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
     public override async ValueTask<decimal> Read(NpgsqlReadBuffer buf, int len, bool async, FieldDescription? fieldDescription = null)
     {
         await buf.Ensure(4 * sizeof(short), async);
+        var startingPosition = buf.ReadPosition;
         var result = new DecimalRaw();
         var groups = buf.ReadInt16();
         var weight = buf.ReadInt16() - groups + 1;
@@ -68,10 +69,16 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         if (scale < 0 is var exponential && exponential)
             scale = (short)(-scale);
         else
+        {
+            if (scale > MaxDecimalScale)
+            {
+                var diff = (short)(scale - MaxDecimalScale);
+                groups -= diff;
+                weight += diff;
+                scale = MaxDecimalScale;
+            }
             result.Scale = scale;
-
-        if (scale > MaxDecimalScale)
-            throw new OverflowException("Numeric value does not fit in a System.Decimal");
+        }
 
         var scaleDifference = exponential
             ? weight * MaxGroupScale
@@ -117,6 +124,10 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
                 }
         }
 
+        var writtenBytes = buf.ReadPosition - startingPosition;
+        var remainingBytes = len - writtenBytes;
+        if (remainingBytes > 0)
+            await buf.Skip(remainingBytes, async);
         return result.Value;
     }
 
