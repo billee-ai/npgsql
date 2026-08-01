@@ -132,53 +132,55 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         return result.Value;
     }
 
-    static readonly BigInteger MaxDecimalCoefficient = new(decimal.MaxValue);
-
-    // Rounding path for values that may not fit a System.Decimal exactly. Accumulates the
-    // full wire value into a BigInteger, then reduces its scale with half-away-from-zero
-    // rounding (the same midpoint rule as Postgres round() and the write direction) until
-    // the coefficient fits decimal's 96-bit mantissa and 28-digit max scale. Throws only
+    // Rounding path for values that may not fit a System.Decimal exactly. Renders the wire
+    // digits to text and hands them to decimal.Parse, which is exactly what the v2.x text
+    // protocol did: round to the nearest representable decimal, throw OverflowException only
     // when the integer part alone cannot fit, i.e. |value| > decimal.MaxValue.
     async ValueTask<decimal> ReadRounded(NpgsqlReadBuffer buf, bool async, short groups, int weight, bool negative, short scale)
     {
         await buf.Ensure(groups * sizeof(ushort), async);
 
-        var coefficient = BigInteger.Zero;
+        var digits = new System.Text.StringBuilder(groups * MaxGroupScale + MaxGroupScale + 2);
+        if (negative)
+            digits.Append('-');
         for (var i = 0; i < groups; i++)
-            coefficient = coefficient * MaxGroupSize + buf.ReadUInt16();
-
-        // value = coefficient * 10000^weight. Rebase so that value = coefficient / 10^effectiveScale.
-        var exponent = weight * MaxGroupScale + scale;
-        var effectiveScale = (int)scale;
-        if (exponent > 0)
-            coefficient *= BigInteger.Pow(10, exponent);
-        else
-            effectiveScale -= exponent;
-
-        // Rounding up can carry into an extra digit, so re-check the fit and drop further if needed.
-        var drop = Math.Max(effectiveScale - MaxDecimalScale, 0);
-        while (true)
         {
-            var candidate = coefficient;
-            if (drop > 0)
-            {
-                var divisor = BigInteger.Pow(10, drop);
-                candidate = BigInteger.DivRem(coefficient, divisor, out var remainder);
-                if (remainder * 2 >= divisor)
-                    candidate += BigInteger.One;
-            }
+            var group = buf.ReadUInt16();
+            if (i == 0)
+                digits.Append(group);
+            else
+                digits.Append(group.ToString("D4", CultureInfo.InvariantCulture));
+        }
 
-            if (candidate <= MaxDecimalCoefficient)
-                return new decimal(
-                    (int)(uint)(candidate & uint.MaxValue),
-                    (int)(uint)((candidate >> 32) & uint.MaxValue),
-                    (int)(uint)((candidate >> 64) & uint.MaxValue),
-                    negative,
-                    (byte)(effectiveScale - drop));
+        // The digits string is an integer equal to value / 10000^weight; place the decimal
+        // point accordingly. weight >= 0 appends the missing zero groups; weight < 0 splits
+        // the digits (padding with leading zeros when the value is a pure fraction).
+        var text = digits.ToString();
+        var start = negative ? 1 : 0;
+        var digitCount = text.Length - start;
+        var pointShift = weight * MaxGroupScale;
+        if (pointShift >= 0)
+            text += new string('0', pointShift);
+        else if (-pointShift < digitCount)
+            text = text.Insert(text.Length + pointShift, ".");
+        else
+            text = text.Insert(start, "0." + new string('0', -pointShift - digitCount));
 
-            if (effectiveScale - drop == 0)
-                throw new OverflowException("Numeric value does not fit in a System.Decimal");
-            drop++;
+        // Pad the fraction out to dscale (capped at decimal's max scale) so the parsed value
+        // keeps the same scale the v2.x text protocol produced from Postgres's rendering.
+        var fraction = pointShift < 0 ? -pointShift : 0;
+        var pad = Math.Min((int)scale, MaxDecimalScale) - fraction;
+        if (pad > 0)
+            text = (fraction == 0 ? text + "." : text) + new string('0', pad);
+
+        try
+        {
+            return decimal.Parse(text, NumberStyles.Number, CultureInfo.InvariantCulture);
+        }
+        catch (OverflowException)
+        {
+            // Keep the driver's historical message for callers and error grouping.
+            throw new OverflowException("Numeric value does not fit in a System.Decimal");
         }
     }
 

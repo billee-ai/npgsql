@@ -126,17 +126,18 @@ public class NumericTests : MultiplexingTestBase
     public async Task Read_overflow_is_safe()
     {
         using var conn = await OpenConnectionAsync();
-        // This 29-digit number used to cause an OverflowException; it now rounds to 28 digits.
-        // The midpoint digit rounds away from zero, matching Postgres round() and the write direction.
-        // It is important to have an unread column after the wide one to prove the read consumed the
-        // whole value and the reader stays usable in ReaderState.InResult.
+        // This 29-digit number used to cause an OverflowException; it now rounds to 28 digits
+        // with decimal.Parse semantics, exactly as the v2.x text protocol did (the exact
+        // midpoint at digit 29 resolves to the truncated value under Parse's rounding).
+        // It is important to have an unread column after the wide one to prove the read consumed
+        // the whole value and the reader stays usable in ReaderState.InResult.
         using var cmd = new NpgsqlCommand(@"SELECT (0.20285714285714285714285714285)::numeric, generate_series FROM generate_series(1, 2)", conn);
         using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess);
         var i = 1;
 
         while (reader.Read())
         {
-            Assert.That(reader.GetDecimal(0), Is.EqualTo(0.2028571428571428571428571429m));
+            Assert.That(reader.GetDecimal(0), Is.EqualTo(0.2028571428571428571428571428m));
             var intValue = reader.GetInt32(1);
 
             Assert.That(intValue, Is.EqualTo(i++));
