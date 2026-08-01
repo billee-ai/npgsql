@@ -67,15 +67,27 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         var scale = buf.ReadInt16();
         if (scale < 0 is var exponential && exponential)
             scale = (short)(-scale);
-        else
-            result.Scale = scale;
-
-        if (scale > MaxDecimalScale)
-            throw new OverflowException("Numeric value does not fit in a System.Decimal");
 
         var scaleDifference = exponential
             ? weight * MaxGroupScale
             : weight * MaxGroupScale + scale;
+
+        // A value that may not fit a System.Decimal exactly is rounded to the nearest
+        // representable decimal instead of throwing, matching the v2.x text-protocol
+        // semantics of decimal.Parse. Only a value whose integer part cannot fit at any
+        // scale still throws. The last condition catches values whose coefficient
+        // (digit groups shifted up to the target scale) exceeds 28 digits even though
+        // the group count and dscale look small, e.g. trailing zero groups stripped
+        // from the wire below dscale, or large integers ending in zero groups.
+        if (!exponential && (scale > MaxDecimalScale || groups >= MaxGroupCount ||
+            scaleDifference > 0 && groups * MaxGroupScale + scaleDifference > MaxDecimalScale))
+            return await ReadRounded(buf, async, groups, weight, sign == SignNegative, scale);
+
+        if (!exponential)
+            result.Scale = scale;
+
+        if (scale > MaxDecimalScale)
+            throw new OverflowException("Numeric value does not fit in a System.Decimal");
 
         if (groups > MaxGroupCount)
             throw new OverflowException("Numeric value does not fit in a System.Decimal");
@@ -118,6 +130,56 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         }
 
         return result.Value;
+    }
+
+    static readonly BigInteger MaxDecimalCoefficient = new(decimal.MaxValue);
+
+    // Rounding path for values that may not fit a System.Decimal exactly. Accumulates the
+    // full wire value into a BigInteger, then reduces its scale with half-away-from-zero
+    // rounding (the same midpoint rule as Postgres round() and the write direction) until
+    // the coefficient fits decimal's 96-bit mantissa and 28-digit max scale. Throws only
+    // when the integer part alone cannot fit, i.e. |value| > decimal.MaxValue.
+    async ValueTask<decimal> ReadRounded(NpgsqlReadBuffer buf, bool async, short groups, int weight, bool negative, short scale)
+    {
+        await buf.Ensure(groups * sizeof(ushort), async);
+
+        var coefficient = BigInteger.Zero;
+        for (var i = 0; i < groups; i++)
+            coefficient = coefficient * MaxGroupSize + buf.ReadUInt16();
+
+        // value = coefficient * 10000^weight. Rebase so that value = coefficient / 10^effectiveScale.
+        var exponent = weight * MaxGroupScale + scale;
+        var effectiveScale = (int)scale;
+        if (exponent > 0)
+            coefficient *= BigInteger.Pow(10, exponent);
+        else
+            effectiveScale -= exponent;
+
+        // Rounding up can carry into an extra digit, so re-check the fit and drop further if needed.
+        var drop = Math.Max(effectiveScale - MaxDecimalScale, 0);
+        while (true)
+        {
+            var candidate = coefficient;
+            if (drop > 0)
+            {
+                var divisor = BigInteger.Pow(10, drop);
+                candidate = BigInteger.DivRem(coefficient, divisor, out var remainder);
+                if (remainder * 2 >= divisor)
+                    candidate += BigInteger.One;
+            }
+
+            if (candidate <= MaxDecimalCoefficient)
+                return new decimal(
+                    (int)(uint)(candidate & uint.MaxValue),
+                    (int)(uint)((candidate >> 32) & uint.MaxValue),
+                    (int)(uint)((candidate >> 64) & uint.MaxValue),
+                    negative,
+                    (byte)(effectiveScale - drop));
+
+            if (effectiveScale - drop == 0)
+                throw new OverflowException("Numeric value does not fit in a System.Decimal");
+            drop++;
+        }
     }
 
     async ValueTask<byte> INpgsqlTypeHandler<byte>.Read(NpgsqlReadBuffer buf, int len, bool async, FieldDescription? fieldDescription)
