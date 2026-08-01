@@ -149,6 +149,48 @@ public class NumericTests(MultiplexingMode multiplexingMode) : MultiplexingTestB
         }
     }
 
+    [Test, Description("Truncation must not corrupt values whose trailing zero digit groups were stripped from the wire format")]
+    public async Task Read_truncated_value_with_stripped_trailing_zero_groups()
+    {
+        // Postgres strips trailing zero base-10000 digit groups before sending, so a value's
+        // stored groups can end well before its display scale (dscale). 1::numeric(38,33) is
+        // transmitted as a single group [1] with dscale 33. Computing the groups to drop from
+        // dscale alone drops significant groups, or the whole value.
+        // A product of two numeric(28,20) columns has dscale 40, so every round-number
+        // rate/multiplier product takes this path.
+        using var conn = await OpenConnectionAsync();
+        using var cmd = new NpgsqlCommand(@"SELECT
+            1::numeric(38,33),
+            1::numeric(28,20) * 1::numeric(28,20) * 1::numeric(28,20),
+            0.5::numeric(28,20) * 1::numeric(28,20),
+            1.0000000001::numeric(28,20) * 1.0000000001::numeric(28,20)", conn);
+        using var reader = await cmd.ExecuteReaderAsync();
+        await reader.ReadAsync();
+
+        Assert.That(reader.GetDecimal(0), Is.EqualTo(1m));
+        Assert.That(reader.GetDecimal(1), Is.EqualTo(1m));
+        Assert.That(reader.GetDecimal(2), Is.EqualTo(0.5m));
+        // 21 significant digits: fits in a decimal untruncated, so no digits may be lost.
+        Assert.That(reader.GetDecimal(3), Is.EqualTo(1.00000000020000000001m));
+    }
+
+    [Test, Description("Documents that overflow from total significant digits (rather than scale) is not covered by the dscale truncation")]
+    public async Task Read_overflow_from_total_width_still_throws()
+    {
+        // Scale 27 is under MaxDecimalScale, so the truncation branch never engages, but the
+        // 32 significant digits exceed decimal's 96-bit mantissa and the read still throws.
+        // This is the SUM(amount)-over-money shape from EZ-1204.
+        using var conn = await OpenConnectionAsync();
+        using var cmd = new NpgsqlCommand(@"SELECT 46320.903225806451612903225806448::numeric", conn);
+        using var reader = await cmd.ExecuteReaderAsync();
+        await reader.ReadAsync();
+
+        Assert.That(() => reader.GetDecimal(0),
+            Throws.Exception
+                .With.TypeOf<OverflowException>()
+                .With.Message.EqualTo("Numeric value does not fit in a System.Decimal"));
+    }
+
     [Test]
     [TestCaseSource(nameof(ReadWriteCases))]
     public async Task Read_BigInteger(string query, decimal expected)
