@@ -1,7 +1,6 @@
 ﻿<Project>
   <PropertyGroup>
     <VersionPrefix>7.0.10.2</VersionPrefix>
-    <VersionSuffix>pre</VersionSuffix>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Nullable>enable</Nullable>
