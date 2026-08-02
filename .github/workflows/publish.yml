@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - billee-main
+  workflow_dispatch: 
 
 env:
   dotnet_sdk_version: '8.0.x'
