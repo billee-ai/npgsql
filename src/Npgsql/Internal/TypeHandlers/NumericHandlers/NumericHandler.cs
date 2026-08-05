@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Globalization;
 using System.Numerics;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql.BackendMessages;
@@ -67,15 +68,27 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         var scale = buf.ReadInt16();
         if (scale < 0 is var exponential && exponential)
             scale = (short)(-scale);
-        else
-            result.Scale = scale;
-
-        if (scale > MaxDecimalScale)
-            throw new OverflowException("Numeric value does not fit in a System.Decimal");
 
         var scaleDifference = exponential
             ? weight * MaxGroupScale
             : weight * MaxGroupScale + scale;
+
+        // A value that may not fit a System.Decimal exactly is rounded to the nearest
+        // representable decimal instead of throwing, matching the v2.x text-protocol
+        // semantics of decimal.Parse. Only a value whose integer part cannot fit at any
+        // scale still throws. The last condition catches values whose coefficient
+        // (digit groups shifted up to the target scale) exceeds 28 digits even though
+        // the group count and dscale look small, e.g. trailing zero groups stripped
+        // from the wire below dscale, or large integers ending in zero groups.
+        if (!exponential && (scale > MaxDecimalScale || groups >= MaxGroupCount ||
+            scaleDifference > 0 && groups * MaxGroupScale + scaleDifference > MaxDecimalScale))
+            return await ReadRounded(buf, async, groups, weight, sign == SignNegative, scale);
+
+        if (!exponential)
+            result.Scale = scale;
+
+        if (scale > MaxDecimalScale)
+            throw new OverflowException("Numeric value does not fit in a System.Decimal");
 
         if (groups > MaxGroupCount)
             throw new OverflowException("Numeric value does not fit in a System.Decimal");
@@ -118,6 +131,91 @@ public partial class NumericHandler : NpgsqlTypeHandler<decimal>,
         }
 
         return result.Value;
+    }
+
+    // Rounding path for values that may not fit a System.Decimal exactly. Renders the wire
+    // digits to text and hands them to decimal.Parse, which is exactly what the v2.x text
+    // protocol did: round to the nearest representable decimal, throw OverflowException only
+    // when the integer part alone cannot fit, i.e. |value| > decimal.MaxValue.
+    static async ValueTask<decimal> ReadRounded(NpgsqlReadBuffer buf, bool async, short groups, int weight, bool negative, short scale)
+    {
+        await buf.Ensure(groups * sizeof(ushort), async);
+
+        var digits = new System.Text.StringBuilder(groups * MaxGroupScale + MaxGroupScale + 2);
+        if (negative)
+            digits.Append('-');
+        for (var i = 0; i < groups; i++)
+        {
+            var group = buf.ReadUInt16();
+            if (i == 0)
+                digits.Append(group);
+            else
+                digits.Append(group.ToString("D4", CultureInfo.InvariantCulture));
+        }
+
+        // The digits string is an integer equal to value / 10000^weight; place the decimal
+        // point accordingly. weight >= 0 appends the missing zero groups; weight < 0 splits
+        // the digits (padding with leading zeros when the value is a pure fraction).
+        var start = negative ? 1 : 0;
+        var digitCount = digits.Length - start;
+        var pointShift = weight * MaxGroupScale;
+        if (pointShift >= 0)
+            digits.Append('0', pointShift);
+        else if (-pointShift < digitCount)
+            digits.Insert(digits.Length + pointShift, ".");
+        else
+            digits.Insert(start, "0.").Insert(start + 2, "0", -pointShift - digitCount);
+
+        // Normalize the fraction out to dscale (capped at decimal's max scale) so the parsed value
+        // keeps the same scale the v2.x text protocol produced from Postgres's rendering.
+        var fraction = pointShift < 0 ? -pointShift : 0;
+        NormalizeFractionalDigits(digits, fraction, scale);
+
+        try
+        {
+            return decimal.Parse(digits.ToString(), NumberStyles.Number, CultureInfo.InvariantCulture);
+        }
+        catch (OverflowException)
+        {
+            // Keep the driver's historical message for callers and error grouping.
+            throw new OverflowException("Numeric value does not fit in a System.Decimal");
+        }
+    }
+
+    // Normalizes the fractional part of `digits` (currently `fractionDigits` digits long) to
+    // min(scale, MaxDecimalScale) digits, padding with trailing zeros as needed.
+    //
+    // Excess digits (fractionDigits > target) are only trimmed here when scale itself already fits
+    // a System.Decimal (scale <= MaxDecimalScale): in that case the excess is guaranteed to be zero
+    // padding from Postgres always transmitting whole 4-digit base-10000 groups, so a plain trim is
+    // exact. When scale exceeds MaxDecimalScale, the excess digits may be real precision rather than
+    // padding, so they are left in place for decimal.Parse to round (round-half-to-even), matching
+    // the v2.x text-protocol semantics instead of silently truncating significant digits ourselves.
+    static void NormalizeFractionalDigits(StringBuilder digits, int fractionDigits, short scale)
+    {
+        var target = Math.Min(scale, (short)MaxDecimalScale);
+        var padding = target - fractionDigits;
+
+        // target == fractionDigits: already exact
+        if (padding == 0) return;
+
+        if (padding > 0)
+        {
+            if (fractionDigits == 0)
+                digits.Append('.');
+
+            digits.Append('0', padding);
+            return;
+        }
+
+        // Scale > MaxDecimalScale: let decimal.Parse round
+        if (scale > MaxDecimalScale) return;
+
+        // scale <= MaxDecimalScale and fractionDigits > target: padding is the amount of guaranteed-zero padding to trim
+        var trimmedAmount = -padding;
+        digits.Remove(digits.Length - trimmedAmount, trimmedAmount);
+        if (target == 0 && digits[digits.Length - 1] == '.')
+            digits.Remove(digits.Length - 1, 1);
     }
 
     async ValueTask<byte> INpgsqlTypeHandler<byte>.Read(NpgsqlReadBuffer buf, int len, bool async, FieldDescription? fieldDescription)

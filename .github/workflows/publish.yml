@@ -25,8 +25,12 @@ jobs:
         with:
           dotnet-version: ${{ env.dotnet_sdk_version }}
 
+      - name: Set version suffix for non-release branches
+        if: github.ref_name != 'billee-main'
+        run: echo "VERSION_SUFFIX_OVERRIDE=/p:VersionSuffix=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
       - name: Pack
-        run: dotnet pack Npgsql.sln --configuration Release --output ${{ github.workspace }}/packages
+        run: dotnet pack Npgsql.sln --configuration Release --output ${{ github.workspace }}/packages ${{ env.VERSION_SUFFIX_OVERRIDE }}
 
       - name: Publish to GitHub Packages
         run: |
