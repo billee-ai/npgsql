@@ -81,6 +81,30 @@ public class NumericTests : MultiplexingTestBase
         new object[] { "1234567844445555.000000000", 1234567844445555.000000000M },
         new object[] { "11112222000000000000", 11112222000000000000M },
         new object[] { "0::numeric", 0M },
+
+        // The following exercise NumericHandler.ReadRounded's fraction normalization: a wide-enough
+        // numeric routes through the rounding read path, which must reproduce the exact dscale Postgres
+        // reports rather than whatever scale the wire's base-10000 digit groups happen to render.
+
+        // Fraction shorter than dscale: no fractional groups are sent for a round-number cast to a
+        // wide numeric(_,3), so the read must pad with zeros to reach the requested scale.
+        new object[] { "12345678901234567890123456::numeric(30,3)", 12345678901234567890123456.000M },
+
+        // Fraction exactly matches dscale: no padding or trimming needed.
+        new object[] { "12345678901234567890123456.78::numeric", 12345678901234567890123456.78M },
+
+        // Fraction longer than dscale: Postgres always transmits whole 4-digit digit groups, so a
+        // dscale of 1 still renders a full trailing group (e.g. "5000"); the excess zeros within that
+        // group must be trimmed to match the real dscale exactly.
+        new object[] { "12345678901234567890123456.5::numeric(30,1)", 12345678901234567890123456.5M },
+
+        // dscale wider than System.Decimal can hold (> 28) is capped: the fraction is padded out to
+        // exactly 28 digits rather than the requested 30.
+        new object[] { "1::numeric(31,30)", 1.0000000000000000000000000000M },
+
+        new object[] { "-12345678901234567890123456.5::numeric(30,1)", -12345678901234567890123456.5M },
+        new object[] { "-12345678901234567890123456::numeric(30,3)", -12345678901234567890123456.000M },
+        new object[] { "12345678901234567890123456::numeric(30,0)", 12345678901234567890123456M },
     };
 
     [Test]
